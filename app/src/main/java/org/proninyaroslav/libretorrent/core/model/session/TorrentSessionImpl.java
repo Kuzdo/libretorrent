@@ -26,6 +26,7 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
 import org.libtorrent4j.AlertListener;
 import org.libtorrent4j.AnnounceEntry;
 import org.libtorrent4j.BDecodeNode;
@@ -95,7 +96,6 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Objects;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -545,16 +545,25 @@ public class TorrentSessionImpl extends SessionManager
         }
     }
 
-    private void mergeTrackersAndSeeds(String id, AddTorrentParams params, byte[] bencode) throws IOException {
+    private void mergeTrackersAndSeeds(String id, AddTorrentParams params, byte[] bencode) throws IOException, UnknownUriException {
         var th = find(Sha1Hash.parseHex(id));
         if (th != null) {
-            byte[] b;
             if (bencode == null) {
-                b = FileUtils.readFileToByteArray(new File(Objects.requireNonNull(Uri.parse(params.source).getPath())));
-            } else {
-                b = bencode;
+                if (params.fromMagnet) {
+                    /* No bencode available for unresolved magnet links */
+                    return;
+                }
+                try (FileDescriptorWrapper w = fs.getFD(Uri.parse(params.source))) {
+                    FileDescriptor fd = w.open("r");
+                    try (FileInputStream fin = new FileInputStream(fd)) {
+                        bencode = IOUtils.toByteArray(fin);
+                    }
+                }
             }
-            bdecode_node n = BDecodeNode.bdecode(b).swig();
+            if (bencode == null) {
+                return;
+            }
+            bdecode_node n = BDecodeNode.bdecode(bencode).swig();
 
             for (var tracker : extractTrackers(n, params.fromMagnet)) {
                 th.addTracker(tracker);
@@ -592,7 +601,7 @@ public class TorrentSessionImpl extends SessionManager
                     if (e.url().isEmpty()) {
                         continue;
                     }
-                    e.tier((short) j);
+                    e.tier((short) i);
                     e.failLimit((short) 0);
                     if (fromMagnet) {
                         e.swig().setSource((short) announce_entry.tracker_source.source_magnet_link.swigValue());
