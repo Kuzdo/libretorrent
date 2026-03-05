@@ -60,8 +60,7 @@ public class TrackerListAdapter extends ListAdapter<TrackerItem, TrackerListAdap
     @Override
     public ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
         var inflater = LayoutInflater.from(parent.getContext());
-        var binding = ItemTrackersListBinding.inflate(inflater, null, false);
-
+        var binding = ItemTrackersListBinding.inflate(inflater, parent, false);  // ← parent zamiast null
         return new ViewHolder(binding);
     }
 
