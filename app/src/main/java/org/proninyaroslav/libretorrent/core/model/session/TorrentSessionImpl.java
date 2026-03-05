@@ -88,6 +88,7 @@ import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -96,6 +97,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -146,6 +148,10 @@ public class TorrentSessionImpl extends SessionManager
     private final HashSet<String> magnets = new HashSet<>();
     private final ConcurrentHashMap<String, byte[]> loadedMagnets = new ConcurrentHashMap<>();
     private final ArrayList<String> addTorrentsList = new ArrayList<>();
+    /* Stores torrent bencode for newly added torrents so trackers can be explicitly
+     * added after the torrent is loaded into the session (th.trackers() may not
+     * immediately reflect TorrentInfo's tracker list in libtorrent 2.x) */
+    private final ConcurrentHashMap<String, byte[]> pendingNewTorrentBencode = new ConcurrentHashMap<>();
     private final ReentrantLock syncMagnet = new ReentrantLock();
     private final CompositeDisposable disposables = new CompositeDisposable();
     private final TorrentRepository repo;
@@ -335,6 +341,9 @@ public class TorrentSessionImpl extends SessionManager
             task.remove(false);
 
         if (params.fromMagnet) {
+            if (bencode != null) {
+                pendingNewTorrentBencode.put(params.sha1hash, bencode);
+            }
             download(bencode,
                     saveDir,
                     params.filePriorities,
@@ -345,9 +354,13 @@ public class TorrentSessionImpl extends SessionManager
             try (FileDescriptorWrapper w = fs.getFD(Uri.parse(params.source))) {
                 FileDescriptor fd = w.open("r");
                 try (FileInputStream fin = new FileInputStream(fd)) {
-                    FileChannel chan = fin.getChannel();
-
-                    download(new TorrentInfo(chan.map(FileChannel.MapMode.READ_ONLY, 0, chan.size())),
+                    byte[] torrentBytes = IOUtils.toByteArray(fin);
+                    pendingNewTorrentBencode.put(params.sha1hash, torrentBytes);
+                    ByteBuffer buffer = ByteBuffer.allocateDirect(torrentBytes.length);
+                    buffer.mark();
+                    buffer.put(torrentBytes);
+                    buffer.reset();
+                    download(new TorrentInfo(buffer),
                             saveDir,
                             params.filePriorities,
                             params.sequentialDownload,
@@ -542,6 +555,21 @@ public class TorrentSessionImpl extends SessionManager
             task.pauseManually();
         } else {
             task.resumeManually();
+        }
+    }
+
+    private void addTrackersFromPendingBencode(TorrentHandle th, String hash) {
+        byte[] bencode = pendingNewTorrentBencode.remove(hash);
+        if (bencode == null) {
+            return;
+        }
+        try {
+            bdecode_node n = BDecodeNode.bdecode(bencode).swig();
+            for (var tracker : extractTrackers(n, false)) {
+                th.addTracker(tracker);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Unable to add trackers for new torrent " + hash + ":", e);
         }
     }
 
@@ -1024,12 +1052,15 @@ public class TorrentSessionImpl extends SessionManager
                     if (magnets.contains(hash))
                         break;
                     torrentTasks.put(hash, newTask(th, hash));
-                    if (addTorrentsList.contains(hash))
+                    if (addTorrentsList.contains(hash)) {
+                        addTrackersFromPendingBencode(th, hash);
                         notifyListeners((listener) ->
                                 listener.onTorrentAdded(hash));
-                    else
+                    } else {
+                        pendingNewTorrentBencode.remove(hash);
                         notifyListeners((listener) ->
                                 listener.onTorrentLoaded(hash));
+                    }
                     addTorrentsList.remove(hash);
                     checkStop();
                     runNextLoadTorrentTask();
