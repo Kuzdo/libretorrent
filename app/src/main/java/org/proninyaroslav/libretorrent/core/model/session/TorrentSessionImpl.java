@@ -360,7 +360,9 @@ public class TorrentSessionImpl extends SessionManager
                     buffer.mark();
                     buffer.put(torrentBytes);
                     buffer.reset();
-                    download(new TorrentInfo(buffer),
+                    byte[] bytes = new byte[buffer.remaining()];
+                    buffer.get(bytes);
+                    download(new TorrentInfo(bytes),
                             saveDir,
                             params.filePriorities,
                             params.sequentialDownload,
